@@ -31,12 +31,16 @@ _load_dotenv(PROJECT_ROOT / ".env")
 
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-CALLMEBOT_PHONE = os.environ.get("CALLMEBOT_PHONE", "")
-CALLMEBOT_APIKEY = os.environ.get("CALLMEBOT_APIKEY", "")
+
+# Gmail channel: the assistant's own account + the owner it talks to.
+GMAIL_ADDRESS = os.environ.get("GMAIL_ADDRESS", "")
+GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "").replace(" ", "")
+OWNER_EMAIL = os.environ.get("HERMES_OWNER_EMAIL", "")
 
 MODEL = os.environ.get("HERMES_MODEL", "claude-opus-4-8")
 DATA_DIR = Path(os.environ.get("HERMES_DATA_DIR", PROJECT_ROOT / "data"))
 DB_PATH = DATA_DIR / "hermes.db"
+OUTPUT_DIR = DATA_DIR / "outputs"
 
 # Safety cap on agent-loop iterations per task.
 MAX_ITERATIONS = int(os.environ.get("HERMES_MAX_ITERATIONS", "60"))

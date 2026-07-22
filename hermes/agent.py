@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import anthropic
 
-from . import config, db, tools, whatsapp
+from . import config, db, mailer, tools
 
 SYSTEM_PROMPT = """\
 You are Hermes, an autonomous research and operations assistant for a small business. \
-You run unattended on a dedicated machine and communicate with the business owner via WhatsApp.
+You run unattended on a dedicated machine and communicate with the business owner by email.
 
 How you work:
 - You are given one task at a time from a persistent task queue. Work it to completion in this session.
@@ -17,13 +17,16 @@ How you work:
 (durable facts, decisions, sources, lessons learned) or log_progress (a record of steps taken). \
 Check the memory notes provided in your task context before re-researching something you may already know.
 - Use log_progress after each significant step so there is always a durable record of what you did.
+- For deliverables — reports, comparisons, HTML demos or mockups, CSV data, scripts — use write_file. \
+Every file you write is attached to the completion email, so produce real artifacts rather than \
+describing what one would look like.
 - If you discover follow-up work outside the current task's scope, queue it with add_task instead of drifting.
-- Use send_whatsapp only for important interim findings or genuinely blocking questions; a completion \
-summary is sent automatically when you finish.
+- Use send_email only for important interim findings or genuinely blocking questions; a completion \
+summary with your files attached is sent automatically when you finish.
 
 When you finish, end with a final summary of what you accomplished, key findings, and any recommended \
-next steps. That summary is stored as the task result and sent to the owner on WhatsApp, so write it \
-for a reader on their phone: lead with the outcome, keep it concise and in plain language.
+next steps. That summary becomes the body of the completion email, so write it for the owner: lead \
+with the outcome, keep it concise and in plain language, and mention any attached files by name.
 
 If a task is impossible or blocked, say so clearly in your final summary and explain what is needed.
 """
@@ -59,6 +62,18 @@ def _final_text(response) -> str:
     return "\n".join(b.text for b in response.content if b.type == "text").strip()
 
 
+def _notify(task_row, subject: str, body: str, with_attachments: bool = False) -> None:
+    """Email the owner about this task, threading the reply if it came in by email."""
+    if task_row["email_subject"]:
+        subject = f"Re: {task_row['email_subject']}"
+    attachments = None
+    if with_attachments:
+        out_dir = config.OUTPUT_DIR / f"task_{task_row['id']}"
+        if out_dir.is_dir():
+            attachments = sorted(p for p in out_dir.iterdir() if p.is_file())
+    mailer.send(subject, body, attachments=attachments, in_reply_to=task_row["email_message_id"])
+
+
 def run_task(task_id: int, notify: bool = True) -> bool:
     """Run one task to completion. Returns True if the task finished successfully."""
     task = db.get_task(task_id)
@@ -72,7 +87,11 @@ def run_task(task_id: int, notify: bool = True) -> bool:
     db.add_log(f"Task started: {task['description'][:200]}", task_id)
     print(f"\n=== Running task #{task_id}: {task['description']}\n")
     if notify:
-        whatsapp.send(f"\U0001f680 Hermes started task #{task_id}: {task['description'][:300]}")
+        _notify(
+            task,
+            f"Hermes started task #{task_id}",
+            f"Working on it:\n\n{task['description'][:500]}\n\nYou'll get a summary when it's done.",
+        )
 
     messages = [{"role": "user", "content": _build_context(task)}]
     response = None
@@ -106,7 +125,7 @@ def run_task(task_id: int, notify: bool = True) -> bool:
                 db.set_task_status(task_id, "failed", summary)
                 db.add_log(summary, task_id)
                 if notify:
-                    whatsapp.send(f"⚠️ Hermes task #{task_id} failed: {summary}")
+                    _notify(task, f"Hermes task #{task_id} failed", summary)
                 return False
 
             if response.stop_reason == "pause_turn":
@@ -147,14 +166,14 @@ def run_task(task_id: int, notify: bool = True) -> bool:
             db.set_task_status(task_id, "failed", summary)
             db.add_log(summary, task_id)
             if notify:
-                whatsapp.send(f"⚠️ Hermes task #{task_id} stopped: {summary}")
+                _notify(task, f"Hermes task #{task_id} stopped", summary)
             return False
 
         summary = _final_text(response) or "(no summary produced)"
         db.set_task_status(task_id, "done", summary)
         db.add_log("Task completed.", task_id)
         if notify:
-            whatsapp.send(f"✅ Hermes finished task #{task_id}:\n{summary}")
+            _notify(task, f"Hermes finished task #{task_id}", summary, with_attachments=True)
         print(f"\n=== Task #{task_id} done.\n")
         return True
 
@@ -169,7 +188,7 @@ def run_task(task_id: int, notify: bool = True) -> bool:
         db.set_task_status(task_id, "failed", msg)
         db.add_log(msg, task_id)
         if notify:
-            whatsapp.send(f"⚠️ Hermes task #{task_id} failed: {msg[:300]}")
+            _notify(task, f"Hermes task #{task_id} failed", msg[:500])
         print(msg)
         return False
     except KeyboardInterrupt:

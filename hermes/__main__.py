@@ -6,10 +6,10 @@ Usage:
     python -m hermes run            # run the next pending task
     python -m hermes run 3          # run a specific task
     python -m hermes work           # run all pending tasks, then exit
-    python -m hermes work --watch   # keep polling for new tasks (daemon mode)
+    python -m hermes work --watch   # run forever: poll inbox + queue (daemon mode)
     python -m hermes log [task_id]
     python -m hermes memory
-    python -m hermes test-whatsapp
+    python -m hermes test-email
 """
 
 from __future__ import annotations
@@ -18,7 +18,22 @@ import argparse
 import sys
 import time
 
-from . import agent, config, db, whatsapp
+from . import agent, config, db, mailer
+
+
+def _check_inbox() -> int:
+    """Pull new task emails from the owner into the queue. Returns count added."""
+    added = 0
+    for item in mailer.fetch_new_tasks():
+        task_id = db.add_task(
+            item["description"],
+            email_message_id=item["message_id"] or None,
+            email_subject=item["subject"] or None,
+        )
+        db.add_log(f"Task received by email from {item['from_addr']}", task_id)
+        print(f"[mail] queued task #{task_id} from email: {item['subject'] or item['description'][:80]}")
+        added += 1
+    return added
 
 
 def cmd_add(args) -> None:
@@ -57,8 +72,12 @@ def cmd_run(args) -> None:
 
 
 def cmd_work(args) -> None:
-    print("Hermes worker started." + (" Watching for new tasks..." if args.watch else ""))
+    print("Hermes worker started." + (" Watching inbox and queue..." if args.watch else ""))
+    if args.watch and not mailer.is_configured():
+        print("Note: Gmail is not configured, so tasks can only arrive via 'hermes add'.")
     while True:
+        if mailer.is_configured():
+            _check_inbox()
         task = db.next_pending_task()
         if task is not None:
             agent.run_task(task["id"], notify=not args.quiet)
@@ -90,12 +109,16 @@ def cmd_memory(args) -> None:  # noqa: ARG001
         print()
 
 
-def cmd_test_whatsapp(args) -> None:  # noqa: ARG001
-    if not whatsapp.is_configured():
-        print("CallMeBot is not configured. Set CALLMEBOT_PHONE and CALLMEBOT_APIKEY in .env")
+def cmd_test_email(args) -> None:  # noqa: ARG001
+    if not mailer.is_configured():
+        print("Gmail is not configured. Set GMAIL_ADDRESS, GMAIL_APP_PASSWORD and HERMES_OWNER_EMAIL in .env")
         sys.exit(1)
-    ok = whatsapp.send("Hermes assistant is connected and ready. \U0001f680")
-    print("Test message sent." if ok else "Test message FAILED — check phone/apikey.")
+    ok = mailer.send(
+        "Hermes is connected",
+        "Hermes assistant is connected and ready.\n\n"
+        "Reply to this address with a task and the worker will pick it up.",
+    )
+    print("Test email sent." if ok else "Test email FAILED — check GMAIL_ADDRESS / GMAIL_APP_PASSWORD.")
     sys.exit(0 if ok else 1)
 
 
@@ -112,12 +135,12 @@ def main() -> None:
 
     p_run = sub.add_parser("run", help="Run the next pending task (or a specific one)")
     p_run.add_argument("task_id", nargs="?", type=int, default=None)
-    p_run.add_argument("--quiet", action="store_true", help="Skip WhatsApp notifications")
+    p_run.add_argument("--quiet", action="store_true", help="Skip email notifications")
     p_run.set_defaults(func=cmd_run)
 
     p_work = sub.add_parser("work", help="Run all pending tasks")
-    p_work.add_argument("--watch", action="store_true", help="Keep polling for new tasks")
-    p_work.add_argument("--quiet", action="store_true", help="Skip WhatsApp notifications")
+    p_work.add_argument("--watch", action="store_true", help="Run forever: keep polling inbox and queue")
+    p_work.add_argument("--quiet", action="store_true", help="Skip email notifications")
     p_work.set_defaults(func=cmd_work)
 
     p_log = sub.add_parser("log", help="Show the activity log")
@@ -127,8 +150,8 @@ def main() -> None:
     p_mem = sub.add_parser("memory", help="Show saved memory notes")
     p_mem.set_defaults(func=cmd_memory)
 
-    p_test = sub.add_parser("test-whatsapp", help="Send a test WhatsApp message")
-    p_test.set_defaults(func=cmd_test_whatsapp)
+    p_test = sub.add_parser("test-email", help="Send a test email to the owner")
+    p_test.set_defaults(func=cmd_test_email)
 
     args = parser.parse_args()
 

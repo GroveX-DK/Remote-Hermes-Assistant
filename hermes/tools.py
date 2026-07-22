@@ -1,12 +1,14 @@
 """Tool definitions and dispatch for the Hermes agent.
 
 Server-side tools (web search / web fetch) run on Anthropic's infrastructure.
-Custom tools (memory, logging, WhatsApp) are executed here.
+Custom tools (memory, logging, files, email) are executed here.
 """
 
 from __future__ import annotations
 
-from . import db, whatsapp
+import os
+
+from . import config, db, mailer
 
 SERVER_TOOLS = [
     {"type": "web_search_20260209", "name": "web_search", "max_uses": 15},
@@ -71,12 +73,32 @@ CUSTOM_TOOLS = [
         },
     },
     {
-        "name": "send_whatsapp",
+        "name": "write_file",
         "description": (
-            "Send a WhatsApp message to the business owner via CallMeBot. "
-            "Use for important interim findings or questions during long tasks. "
-            "A completion summary is sent automatically when the task finishes, so do not "
-            "duplicate it. Keep messages under 1000 characters."
+            "Save a deliverable file for the current task: a report, an HTML demo or mockup, "
+            "a CSV, a script, etc. Text content only. All files written during the task are "
+            "attached to the completion email sent to the owner. Writing the same filename "
+            "again overwrites it."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filename": {
+                    "type": "string",
+                    "description": "Plain filename with extension, e.g. 'demo.html' or 'comparison.csv'. No directories.",
+                },
+                "content": {"type": "string", "description": "The full file content."},
+            },
+            "required": ["filename", "content"],
+        },
+    },
+    {
+        "name": "send_email",
+        "description": (
+            "Email the business owner. Use for important interim findings or genuinely "
+            "blocking questions during long tasks. If the task came in by email, your message "
+            "is sent as a reply in the same thread. A completion summary (with any files you "
+            "wrote) is sent automatically when the task finishes, so do not duplicate it."
         ),
         "input_schema": {
             "type": "object",
@@ -105,6 +127,12 @@ CUSTOM_TOOLS = [
 ALL_TOOLS = SERVER_TOOLS + CUSTOM_TOOLS
 
 
+def task_output_dir(task_id: int):
+    path = config.OUTPUT_DIR / f"task_{task_id}"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def dispatch(name: str, tool_input: dict, task_id: int | None) -> tuple[str, bool]:
     """Execute a custom tool. Returns (result_text, is_error)."""
     try:
@@ -128,12 +156,32 @@ def dispatch(name: str, tool_input: dict, task_id: int | None) -> tuple[str, boo
             print(f"  [log] {tool_input['entry']}")
             return "Logged.", False
 
-        if name == "send_whatsapp":
-            ok = whatsapp.send(tool_input["message"])
+        if name == "write_file":
+            if task_id is None:
+                return "No active task to attach files to.", True
+            safe_name = os.path.basename(tool_input["filename"]).strip()
+            if not safe_name or safe_name in (".", ".."):
+                return f"Invalid filename: {tool_input['filename']!r}", True
+            path = task_output_dir(task_id) / safe_name
+            path.write_text(tool_input["content"], encoding="utf-8")
+            db.add_log(f"Wrote file: {safe_name} ({len(tool_input['content'])} chars)", task_id)
+            return f"File '{safe_name}' saved; it will be attached to the completion email.", False
+
+        if name == "send_email":
+            task = db.get_task(task_id) if task_id is not None else None
+            if task is not None and task["email_subject"]:
+                subject = f"Re: {task['email_subject']}"
+            else:
+                subject = f"Hermes update on task #{task_id}"
+            ok = mailer.send(
+                subject,
+                tool_input["message"],
+                in_reply_to=task["email_message_id"] if task is not None else None,
+            )
             if ok:
-                db.add_log(f"WhatsApp sent: {tool_input['message'][:200]}", task_id)
-                return "WhatsApp message sent.", False
-            return "WhatsApp send failed (check CallMeBot configuration).", True
+                db.add_log(f"Email sent: {tool_input['message'][:200]}", task_id)
+                return "Email sent.", False
+            return "Email send failed (check Gmail configuration).", True
 
         if name == "add_task":
             new_id = db.add_task(tool_input["description"])

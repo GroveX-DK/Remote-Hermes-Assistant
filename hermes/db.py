@@ -42,16 +42,32 @@ def connect() -> sqlite3.Connection:
     conn = sqlite3.connect(config.DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.executescript(_SCHEMA)
+    _migrate(conn)
     return conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add columns introduced after the initial schema (no-op on fresh DBs)."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(tasks)")}
+    for col in ("email_message_id", "email_subject"):
+        if col not in cols:
+            conn.execute(f"ALTER TABLE tasks ADD COLUMN {col} TEXT")
 
 
 # --- Tasks ---------------------------------------------------------------
 
-def add_task(description: str) -> int:
+def add_task(
+    description: str,
+    email_message_id: str | None = None,
+    email_subject: str | None = None,
+) -> int:
     with connect() as conn:
         cur = conn.execute(
-            "INSERT INTO tasks (description, status, created_at, updated_at) VALUES (?, 'pending', ?, ?)",
-            (description, _now(), _now()),
+            """
+            INSERT INTO tasks (description, status, created_at, updated_at, email_message_id, email_subject)
+            VALUES (?, 'pending', ?, ?, ?, ?)
+            """,
+            (description, _now(), _now(), email_message_id, email_subject),
         )
         return cur.lastrowid
 
