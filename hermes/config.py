@@ -1,0 +1,48 @@
+"""Configuration for the Hermes assistant.
+
+Values come from environment variables, with a simple .env loader so the
+assistant can run unattended on a machine without extra tooling.
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _load_dotenv(path: Path) -> None:
+    """Load KEY=VALUE lines from a .env file into os.environ (no overrides)."""
+    if not path.exists():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+_load_dotenv(PROJECT_ROOT / ".env")
+
+
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+CALLMEBOT_PHONE = os.environ.get("CALLMEBOT_PHONE", "")
+CALLMEBOT_APIKEY = os.environ.get("CALLMEBOT_APIKEY", "")
+
+MODEL = os.environ.get("HERMES_MODEL", "claude-opus-4-8")
+DATA_DIR = Path(os.environ.get("HERMES_DATA_DIR", PROJECT_ROOT / "data"))
+DB_PATH = DATA_DIR / "hermes.db"
+
+# Safety cap on agent-loop iterations per task.
+MAX_ITERATIONS = int(os.environ.get("HERMES_MAX_ITERATIONS", "60"))
+# How often the worker polls for new tasks in watch mode.
+POLL_SECONDS = int(os.environ.get("HERMES_POLL_SECONDS", "60"))
+
+
+def ensure_data_dir() -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
