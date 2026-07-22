@@ -1,26 +1,25 @@
 # Remote Hermes Assistant
 
-Hermes is an autonomous research and operations assistant for your business. It runs
-unattended on a dedicated machine, works through a persistent task queue, researches on
-the web, **remembers what it has done and what it has been tasked to do**, and talks to
-you **two-way over Gmail**: email it a task from anywhere, and it replies in the same
-thread with results and file attachments.
-
-Built on the Claude API (`claude-opus-4-8`) with server-side web search and web fetch.
+Hermes is an autonomous research and operations assistant for your business, powered by a
+**local Ollama model** — no cloud AI API keys and no per-token costs. It runs unattended
+on a dedicated machine, works through a persistent task queue, researches on the web,
+**remembers what it has done and what it has been tasked to do**, and talks to you
+**two-way over Gmail**: email it a task from anywhere, and it replies in the same thread
+with results and file attachments.
 
 ## What it can do
 
-- **Research & search the web** — Claude's built-in web search + web fetch tools, so no
-  extra search-API keys are needed.
+- **Research & search the web** — built-in DuckDuckGo search plus a page reader, all
+  running locally.
 - **Complete goals** — email it a task (or queue one with the CLI); Hermes works each one
-  to completion in an agentic loop (research → act → verify → summarize).
+  to completion in an agentic loop (search → read sources → act → summarize).
 - **Produce deliverables** — reports, comparisons, CSV data, scripts, and HTML
   demos/mockups. Every file it writes is attached to the completion email.
 - **Remember** — everything is persisted in a local SQLite database (`data/hermes.db`):
   - the **task queue** (what it has been tasked to do, with status and results),
   - an **activity log** (what it has done, step by step),
-  - **long-term memory notes** the agent reads and writes itself (facts about your
-    business, sources, decisions, lessons learned) — carried into every future task.
+  - **long-term memory notes** the agent reads and writes itself — carried into every
+    future task.
 - **Communicate over Gmail, both directions**:
   - **You → Hermes:** send an email to the assistant's address; the subject + body become
     a task. Only mail from your configured owner address is accepted.
@@ -29,7 +28,21 @@ Built on the Claude API (`claude-opus-4-8`) with server-side web search and web 
 
 ## Setup (on the machine that will run it)
 
-Requires Python 3.10+.
+Requires Python 3.10+ and [Ollama](https://ollama.com).
+
+**1. Install Ollama and pull a tool-calling model:**
+
+```bash
+# Install from https://ollama.com/download, then:
+ollama pull qwen3:8b
+```
+
+`qwen3:8b` is the default (good quality, ~5 GB, runs on 16 GB RAM). Other models that
+support tool calling work too — e.g. `llama3.1:8b`, `qwen3:14b`, `mistral-nemo` — set
+`HERMES_MODEL` in `.env` to change. Bigger models give noticeably better research if the
+machine can handle them.
+
+**2. Install Hermes:**
 
 ```bash
 git clone https://github.com/GroveX-DK/Remote-Hermes-Assistant.git
@@ -43,24 +56,21 @@ python -m venv .venv
 
 pip install -r requirements.txt
 
-# Configure secrets
 copy .env.example .env     # Windows  (Linux/macOS: cp .env.example .env)
 ```
 
-Edit `.env`:
+**3. Configure Gmail in `.env`** (recommended: create a dedicated Gmail account for
+Hermes, e.g. `hermes.mybusiness@gmail.com`, so it has its own clean inbox):
 
-1. **`ANTHROPIC_API_KEY`** — from <https://platform.claude.com/>
-2. **Gmail for the assistant** (recommended: create a dedicated Gmail account for Hermes,
-   e.g. `hermes.mybusiness@gmail.com`, so it has its own clean inbox):
-   - On that Google account, turn on **2-Step Verification**.
-   - Create an **App Password**: <https://myaccount.google.com/apppasswords> — Google
-     shows a 16-character password.
-   - Set `GMAIL_ADDRESS` to the assistant's address and `GMAIL_APP_PASSWORD` to that
-     app password.
-3. **`HERMES_OWNER_EMAIL`** — your own email address. Results are sent here, and **only
-   tasks emailed from this address are accepted** (anything else in the inbox is ignored).
+- On that Google account, turn on **2-Step Verification**.
+- Create an **App Password**: <https://myaccount.google.com/apppasswords> — Google shows
+  a 16-character password.
+- Set `GMAIL_ADDRESS` to the assistant's address and `GMAIL_APP_PASSWORD` to that app
+  password.
+- Set `HERMES_OWNER_EMAIL` to your own address. Results are sent here, and **only tasks
+  emailed from this address are accepted** (anything else in the inbox is ignored).
 
-Verify the connection:
+**4. Verify:**
 
 ```bash
 python -m hermes test-email
@@ -137,21 +147,27 @@ python -m hermes test-email
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | — | Claude API key (required) |
+| `OLLAMA_HOST` | `http://localhost:11434` | Where the Ollama server runs |
+| `HERMES_MODEL` | `qwen3:8b` | Ollama model (must support tool calling) |
+| `HERMES_NUM_CTX` | `16384` | Model context window (tokens) |
+| `HERMES_REQUEST_TIMEOUT` | `600` | Seconds to wait for one model response |
 | `GMAIL_ADDRESS` | — | The assistant's own Gmail address |
 | `GMAIL_APP_PASSWORD` | — | App password for that account (needs 2-Step Verification) |
 | `HERMES_OWNER_EMAIL` | — | Your address: gets all results; only sender allowed to queue tasks |
-| `HERMES_MODEL` | `claude-opus-4-8` | Claude model to use |
 | `HERMES_DATA_DIR` | `./data` | Where the SQLite database and output files live |
 | `HERMES_MAX_ITERATIONS` | `60` | Safety cap on agent steps per task |
 | `HERMES_POLL_SECONDS` | `60` | Inbox/queue poll interval in `work --watch` mode |
 
 ## Notes
 
+- Runs fully locally except for web searches (DuckDuckGo) and Gmail. No AI API costs.
+- Model quality matters: small local models are slower and less reliable at multi-step
+  research than cloud frontier models. If results are weak, try a larger model
+  (`qwen3:14b`, `qwen3:32b`) — quality scales with what your hardware can run.
 - `.env` and `data/` are git-ignored — secrets, the assistant's memory, and generated
-  files stay on the machine and are never pushed to GitHub.
+  files stay on the machine.
 - Deliverable files are also kept on disk under `data/outputs/task_<id>/`.
 - Attachments are capped at ~20 MB per email (Gmail limit).
-- Tasks interrupted by network errors or Ctrl+C are returned to the queue, not lost.
+- Tasks interrupted by errors or Ctrl+C are returned to the queue, not lost.
 - Every unread email in the assistant's inbox is marked as read when checked; only mail
   from `HERMES_OWNER_EMAIL` becomes a task.

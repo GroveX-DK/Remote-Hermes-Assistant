@@ -1,8 +1,11 @@
-"""The Hermes agent loop: runs one task with Claude until completion."""
+"""The Hermes agent loop: runs one task with a local Ollama model until completion."""
 
 from __future__ import annotations
 
-import anthropic
+import json
+import re
+import urllib.error
+import urllib.request
 
 from . import config, db, mailer, tools
 
@@ -12,28 +15,53 @@ You run unattended on a dedicated machine and communicate with the business owne
 
 How you work:
 - You are given one task at a time from a persistent task queue. Work it to completion in this session.
-- Research thoroughly using web_search and web_fetch. Prefer primary sources; note where information came from.
+- Research using the web_search tool, then read the best sources with web_fetch. Prefer primary \
+sources and note where information came from. Do not invent facts — if you did not find it, say so.
 - Your context does NOT persist between tasks. Anything worth keeping must be stored with save_memory \
-(durable facts, decisions, sources, lessons learned) or log_progress (a record of steps taken). \
-Check the memory notes provided in your task context before re-researching something you may already know.
-- Use log_progress after each significant step so there is always a durable record of what you did.
+(durable facts, decisions, sources, lessons learned). Check the memory notes listed in your task \
+context before re-researching something you may already know.
+- Use log_progress after each significant step so there is a durable record of what you did.
 - For deliverables — reports, comparisons, HTML demos or mockups, CSV data, scripts — use write_file. \
 Every file you write is attached to the completion email, so produce real artifacts rather than \
 describing what one would look like.
-- If you discover follow-up work outside the current task's scope, queue it with add_task instead of drifting.
+- If you discover follow-up work outside the current task's scope, queue it with add_task.
 - Use send_email only for important interim findings or genuinely blocking questions; a completion \
 summary with your files attached is sent automatically when you finish.
+- Call one tool at a time and use its result before deciding the next step.
 
-When you finish, end with a final summary of what you accomplished, key findings, and any recommended \
-next steps. That summary becomes the body of the completion email, so write it for the owner: lead \
-with the outcome, keep it concise and in plain language, and mention any attached files by name.
+When you are done, reply WITHOUT any tool call, giving a final summary of what you accomplished, \
+key findings, and recommended next steps. That summary becomes the body of the completion email, \
+so write it for the owner: lead with the outcome, keep it concise and in plain language, and \
+mention any attached files by name.
 
 If a task is impossible or blocked, say so clearly in your final summary and explain what is needed.
 """
 
 
+def _chat(messages: list[dict]) -> dict:
+    """One non-streaming call to Ollama's chat API."""
+    payload = {
+        "model": config.MODEL,
+        "messages": messages,
+        "tools": tools.ALL_TOOLS,
+        "stream": False,
+        "options": {"num_ctx": config.NUM_CTX},
+    }
+    req = urllib.request.Request(
+        f"{config.OLLAMA_HOST}/api/chat",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=config.REQUEST_TIMEOUT) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _strip_think(text: str) -> str:
+    """Remove <think>...</think> blocks some models emit."""
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
+
 def _build_context(task_row) -> str:
-    """Dynamic context injected into the user turn (keeps the system prompt cacheable)."""
     parts = [f"# Task #{task_row['id']}\n{task_row['description']}"]
 
     memories = db.list_memories()
@@ -58,10 +86,6 @@ def _build_context(task_row) -> str:
     return "\n\n".join(parts)
 
 
-def _final_text(response) -> str:
-    return "\n".join(b.text for b in response.content if b.type == "text").strip()
-
-
 def _notify(task_row, subject: str, body: str, with_attachments: bool = False) -> None:
     """Email the owner about this task, threading the reply if it came in by email."""
     if task_row["email_subject"]:
@@ -81,8 +105,6 @@ def run_task(task_id: int, notify: bool = True) -> bool:
         print(f"Task #{task_id} not found.")
         return False
 
-    client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY or None)
-
     db.set_task_status(task_id, "in_progress")
     db.add_log(f"Task started: {task['description'][:200]}", task_id)
     print(f"\n=== Running task #{task_id}: {task['description']}\n")
@@ -93,74 +115,56 @@ def run_task(task_id: int, notify: bool = True) -> bool:
             f"Working on it:\n\n{task['description'][:500]}\n\nYou'll get a summary when it's done.",
         )
 
-    messages = [{"role": "user", "content": _build_context(task)}]
-    response = None
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": _build_context(task)},
+    ]
+    final_text = ""
 
     try:
         for iteration in range(config.MAX_ITERATIONS):
-            with client.messages.stream(
-                model=config.MODEL,
-                max_tokens=64000,
-                system=[
-                    {
-                        "type": "text",
-                        "text": SYSTEM_PROMPT,
-                        "cache_control": {"type": "ephemeral"},
-                    }
-                ],
-                thinking={"type": "adaptive"},
-                output_config={"effort": "high"},
-                tools=tools.ALL_TOOLS,
-                messages=messages,
-            ) as stream:
-                for text in stream.text_stream:
-                    print(text, end="", flush=True)
-                response = stream.get_final_message()
-            print()
+            data = _chat(messages)
+            msg = data.get("message", {})
+            content = msg.get("content", "") or ""
+            tool_calls = msg.get("tool_calls") or []
 
-            messages.append({"role": "assistant", "content": response.content})
+            visible = _strip_think(content)
+            if visible:
+                print(visible)
 
-            if response.stop_reason == "refusal":
-                summary = "Task was declined by the model's safety systems and cannot be completed."
-                db.set_task_status(task_id, "failed", summary)
-                db.add_log(summary, task_id)
-                if notify:
-                    _notify(task, f"Hermes task #{task_id} failed", summary)
-                return False
+            assistant_msg = {"role": "assistant", "content": content}
+            if tool_calls:
+                assistant_msg["tool_calls"] = tool_calls
+            messages.append(assistant_msg)
 
-            if response.stop_reason == "pause_turn":
-                # Server-side tool loop paused; re-send to let it resume.
-                continue
-
-            if response.stop_reason == "tool_use":
-                tool_results = []
-                for block in response.content:
-                    if block.type != "tool_use":
-                        continue
-                    print(f"  [tool] {block.name}")
-                    result_text, is_error = tools.dispatch(block.name, block.input, task_id)
-                    tool_results.append(
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": block.id,
-                            "content": result_text,
-                            "is_error": is_error,
-                        }
-                    )
-                messages.append({"role": "user", "content": tool_results})
-                continue
-
-            if response.stop_reason == "max_tokens":
+            if not tool_calls:
+                final_text = visible
+                if final_text:
+                    break
+                # Model produced nothing; nudge it once instead of failing.
                 messages.append(
                     {
                         "role": "user",
-                        "content": "Your previous response was cut off by the output limit. "
-                        "Continue from where you stopped and finish the task.",
+                        "content": "You replied with empty content. Either call a tool to make "
+                        "progress or give your final summary now.",
                     }
                 )
                 continue
 
-            break  # end_turn
+            for call in tool_calls:
+                fn = call.get("function", {})
+                name = fn.get("name", "")
+                args = fn.get("arguments") or {}
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except json.JSONDecodeError:
+                        args = {}
+                print(f"  [tool] {name}({json.dumps(args, ensure_ascii=False)[:200]})")
+                result_text, is_error = tools.dispatch(name, args, task_id)
+                if is_error:
+                    result_text = f"ERROR: {result_text}"
+                messages.append({"role": "tool", "tool_name": name, "content": result_text})
         else:
             summary = f"Stopped after reaching the {config.MAX_ITERATIONS}-iteration safety limit."
             db.set_task_status(task_id, "failed", summary)
@@ -169,7 +173,7 @@ def run_task(task_id: int, notify: bool = True) -> bool:
                 _notify(task, f"Hermes task #{task_id} stopped", summary)
             return False
 
-        summary = _final_text(response) or "(no summary produced)"
+        summary = final_text or "(no summary produced)"
         db.set_task_status(task_id, "done", summary)
         db.add_log("Task completed.", task_id)
         if notify:
@@ -177,18 +181,28 @@ def run_task(task_id: int, notify: bool = True) -> bool:
         print(f"\n=== Task #{task_id} done.\n")
         return True
 
-    except anthropic.APIConnectionError:
-        msg = "Network error while talking to the Claude API. Task returned to the queue."
-        db.set_task_status(task_id, "pending")
-        db.add_log(msg, task_id)
-        print(msg)
-        return False
-    except anthropic.APIStatusError as exc:
-        msg = f"Claude API error {exc.status_code}: {exc.message}"
+    except urllib.error.HTTPError as exc:
+        body = ""
+        try:
+            body = exc.read().decode("utf-8", errors="replace")[:300]
+        except Exception:  # noqa: BLE001
+            pass
+        msg = f"Ollama error {exc.code}: {body or exc.reason}"
+        if exc.code == 404:
+            msg += f" — is the model pulled? Try: ollama pull {config.MODEL}"
         db.set_task_status(task_id, "failed", msg)
         db.add_log(msg, task_id)
         if notify:
-            _notify(task, f"Hermes task #{task_id} failed", msg[:500])
+            _notify(task, f"Hermes task #{task_id} failed", msg)
+        print(msg)
+        return False
+    except (urllib.error.URLError, TimeoutError, ConnectionError):
+        msg = (
+            f"Could not reach Ollama at {config.OLLAMA_HOST} (is 'ollama serve' running?). "
+            "Task returned to the queue."
+        )
+        db.set_task_status(task_id, "pending")
+        db.add_log(msg, task_id)
         print(msg)
         return False
     except KeyboardInterrupt:

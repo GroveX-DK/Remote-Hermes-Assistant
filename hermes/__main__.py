@@ -15,10 +15,29 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
+import urllib.error
+import urllib.request
 
 from . import agent, config, db, mailer
+
+
+def _check_ollama() -> None:
+    """Fail fast with a helpful message if Ollama or the model is unavailable."""
+    try:
+        with urllib.request.urlopen(f"{config.OLLAMA_HOST}/api/tags", timeout=10) as resp:
+            models = [m.get("name", "") for m in json.loads(resp.read()).get("models", [])]
+    except (urllib.error.URLError, TimeoutError, ConnectionError):
+        print(f"Cannot reach Ollama at {config.OLLAMA_HOST}.")
+        print("Install it from https://ollama.com and make sure it is running ('ollama serve').")
+        sys.exit(1)
+    base = config.MODEL.split(":")[0]
+    if not any(m == config.MODEL or m.split(":")[0] == base for m in models):
+        print(f"Model '{config.MODEL}' is not available in Ollama.")
+        print(f"Pull it first:  ollama pull {config.MODEL}")
+        sys.exit(1)
 
 
 def _check_inbox() -> int:
@@ -155,10 +174,8 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    needs_api_key = args.command in ("run", "work")
-    if needs_api_key and not config.ANTHROPIC_API_KEY:
-        print("ANTHROPIC_API_KEY is not set. Copy .env.example to .env and fill it in.")
-        sys.exit(1)
+    if args.command in ("run", "work"):
+        _check_ollama()
 
     try:
         args.func(args)
