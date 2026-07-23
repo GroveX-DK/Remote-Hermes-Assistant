@@ -40,12 +40,15 @@ If a task is impossible or blocked, say so clearly in your final summary and exp
 
 def _chat(messages: list[dict]) -> dict:
     """One non-streaming call to Ollama's chat API."""
+    options = {"num_ctx": config.NUM_CTX}
+    if config.NUM_GPU != "":
+        options["num_gpu"] = int(config.NUM_GPU)
     payload = {
         "model": config.MODEL,
         "messages": messages,
         "tools": tools.ALL_TOOLS,
         "stream": False,
-        "options": {"num_ctx": config.NUM_CTX},
+        "options": options,
     }
     req = urllib.request.Request(
         f"{config.OLLAMA_HOST}/api/chat",

@@ -150,6 +150,7 @@ python -m hermes test-email
 | `OLLAMA_HOST` | `http://localhost:11434` | Where the Ollama server runs |
 | `HERMES_MODEL` | `qwen3:8b` | Ollama model (must support tool calling) |
 | `HERMES_NUM_CTX` | `16384` | Model context window (tokens) |
+| `HERMES_NUM_GPU` | (unset) | Set to `0` to force CPU-only inference if the GPU/driver crashes |
 | `HERMES_REQUEST_TIMEOUT` | `600` | Seconds to wait for one model response |
 | `GMAIL_ADDRESS` | — | The assistant's own Gmail address |
 | `GMAIL_APP_PASSWORD` | — | App password for that account (needs 2-Step Verification) |

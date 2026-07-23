@@ -37,6 +37,9 @@ MODEL = os.environ.get("HERMES_MODEL", "qwen3:8b")
 NUM_CTX = int(os.environ.get("HERMES_NUM_CTX", "16384"))
 # Seconds to wait for a single model response (local inference can be slow).
 REQUEST_TIMEOUT = int(os.environ.get("HERMES_REQUEST_TIMEOUT", "600"))
+# Set to 0 to force CPU-only inference (workaround for GPU/driver crashes).
+# Leave unset to let Ollama decide.
+NUM_GPU = os.environ.get("HERMES_NUM_GPU", "")
 
 # Gmail channel: the assistant's own account + the owner it talks to.
 GMAIL_ADDRESS = os.environ.get("GMAIL_ADDRESS", "")
